@@ -3,7 +3,7 @@ kind: Kustomization
 resources:
   - ../default
 
-namespace: opendatahub
+namespace: not-opendatahub
 configMapGenerator:
   - envs:
       - params.env
