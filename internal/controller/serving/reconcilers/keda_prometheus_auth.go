@@ -57,27 +57,31 @@ var KedaLabelPredicate = predicate.NewPredicateFuncs(func(o client.Object) bool 
 // kedaPrometheusAuthResources owns the CRUD lifecycle of the per-namespace KEDA Prometheus authentication
 // resources (ServiceAccount, Secret, Role, RoleBinding, TriggerAuthentication). It is intentionally agnostic of
 // InferenceService vs. LLMInferenceService: callers (KserveKEDAReconciler, LLMKEDAReconciler) pass in the
-// namespace, a non-controlling OwnerReference for the object driving reconciliation, and that object's
-// annotations. This lets both CRDs safely co-own and share the exact same set of resources in a namespace.
+// namespace and a non-controlling OwnerReference for the object driving reconciliation. This lets both CRDs
+// safely co-own and share the exact same set of resources in a namespace.
+//
+// Owner annotations are not copied: owners in one namespace disagree on them, and each rewrite re-enqueues
+// every owner through the Owns() watch. Annotations copied by earlier releases stay in place - an unset
+// expected map matches under DeepDerivative, so an upgrade does not write to every namespace.
 type kedaPrometheusAuthResources struct {
 	client client.Client
 }
 
 // reconcile creates/updates the full set of KEDA Prometheus auth resources, upserting ownerRef onto each.
-func (k *kedaPrometheusAuthResources) reconcile(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) error {
+func (k *kedaPrometheusAuthResources) reconcile(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference) error {
 	if err := retryOnConflicts(func() error { return k.reconcileServiceAccount(ctx, log, namespace, ownerRef) }); err != nil {
 		return fmt.Errorf("failed to reconcile service account: %w", err)
 	}
 	if err := retryOnConflicts(func() error { return k.reconcileSecret(ctx, log, namespace, ownerRef) }); err != nil {
 		return fmt.Errorf("failed to reconcile secret: %w", err)
 	}
-	if err := retryOnConflicts(func() error { return k.reconcileRole(ctx, log, namespace, ownerRef, annotations) }); err != nil {
+	if err := retryOnConflicts(func() error { return k.reconcileRole(ctx, log, namespace, ownerRef) }); err != nil {
 		return fmt.Errorf("failed to reconcile role: %w", err)
 	}
-	if err := retryOnConflicts(func() error { return k.reconcileRoleBinding(ctx, log, namespace, ownerRef, annotations) }); err != nil {
+	if err := retryOnConflicts(func() error { return k.reconcileRoleBinding(ctx, log, namespace, ownerRef) }); err != nil {
 		return fmt.Errorf("failed to reconcile role binding: %w", err)
 	}
-	if err := retryOnConflicts(func() error { return k.reconcileTriggerAuthentication(ctx, log, namespace, ownerRef, annotations) }); err != nil && !meta.IsNoMatchError(err) {
+	if err := retryOnConflicts(func() error { return k.reconcileTriggerAuthentication(ctx, log, namespace, ownerRef) }); err != nil && !meta.IsNoMatchError(err) {
 		return fmt.Errorf("failed to reconcile trigger authentication: %w", err)
 	}
 	return nil
@@ -171,15 +175,15 @@ func (k *kedaPrometheusAuthResources) cleanupNamespace(ctx context.Context, log 
 }
 
 // --- TriggerAuthentication ---
-func (k *kedaPrometheusAuthResources) reconcileTriggerAuthentication(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) error {
-	expected := k.expectedTriggerAuthentication(namespace, ownerRef, annotations)
+func (k *kedaPrometheusAuthResources) reconcileTriggerAuthentication(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference) error {
+	expected := k.expectedTriggerAuthentication(namespace, ownerRef)
 	curr := &kedaapi.TriggerAuthentication{}
 	key := client.ObjectKey{Namespace: expected.Namespace, Name: expected.Name}
 
 	err := k.client.Get(ctx, key, curr)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return k.createTriggerAuthentication(ctx, log, namespace, ownerRef, annotations)
+			return k.createTriggerAuthentication(ctx, log, namespace, ownerRef)
 		}
 		return fmt.Errorf("failed to get TriggerAuthentication %s: %w", key.String(), err)
 	}
@@ -189,7 +193,6 @@ func (k *kedaPrometheusAuthResources) reconcileTriggerAuthentication(ctx context
 
 	if equality.Semantic.DeepDerivative(expected.Spec, curr.Spec) &&
 		equality.Semantic.DeepDerivative(expected.Labels, curr.Labels) &&
-		equality.Semantic.DeepDerivative(expected.Annotations, curr.Annotations) &&
 		equality.Semantic.DeepDerivative(expected.OwnerReferences, curr.OwnerReferences) {
 		log.V(2).Info("TriggerAuthentication is up-to-date", "namespace", key.Namespace, "name", key.Name)
 		return nil
@@ -202,23 +205,22 @@ func (k *kedaPrometheusAuthResources) reconcileTriggerAuthentication(ctx context
 	return nil
 }
 
-func (k *kedaPrometheusAuthResources) createTriggerAuthentication(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) error {
+func (k *kedaPrometheusAuthResources) createTriggerAuthentication(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference) error {
 	log.Info("Creating TriggerAuthentication", "name", KEDAPrometheusAuthTriggerAuthName)
-	ta := k.expectedTriggerAuthentication(namespace, ownerRef, annotations)
+	ta := k.expectedTriggerAuthentication(namespace, ownerRef)
 	if err := k.client.Create(ctx, ta); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create TriggerAuthentication %s/%s: %w", ta.Namespace, ta.Name, err)
 	}
 	return nil
 }
 
-func (k *kedaPrometheusAuthResources) expectedTriggerAuthentication(namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) *kedaapi.TriggerAuthentication {
+func (k *kedaPrometheusAuthResources) expectedTriggerAuthentication(namespace string, ownerRef metav1.OwnerReference) *kedaapi.TriggerAuthentication {
 	return &kedaapi.TriggerAuthentication{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            KEDAPrometheusAuthTriggerAuthName,
 			Namespace:       namespace,
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 			Labels:          getKedaLabels(),
-			Annotations:     annotations,
 		},
 		Spec: kedaapi.TriggerAuthenticationSpec{
 			SecretTargetRef: []kedaapi.AuthSecretTargetRef{
@@ -351,15 +353,15 @@ func (k *kedaPrometheusAuthResources) expectedSecret(namespace string, ownerRef 
 }
 
 // --- Role ---
-func (k *kedaPrometheusAuthResources) reconcileRole(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) error {
-	expected := k.expectedRole(namespace, ownerRef, annotations)
+func (k *kedaPrometheusAuthResources) reconcileRole(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference) error {
+	expected := k.expectedRole(namespace, ownerRef)
 	curr := &rbacv1.Role{}
 	key := client.ObjectKey{Namespace: expected.Namespace, Name: expected.Name}
 
 	err := k.client.Get(ctx, key, curr)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return k.createRole(ctx, log, namespace, ownerRef, annotations)
+			return k.createRole(ctx, log, namespace, ownerRef)
 		}
 		return fmt.Errorf("failed to get Role %s: %w", key.String(), err)
 	}
@@ -369,7 +371,6 @@ func (k *kedaPrometheusAuthResources) reconcileRole(ctx context.Context, log log
 
 	if equality.Semantic.DeepDerivative(expected.Rules, curr.Rules) &&
 		equality.Semantic.DeepDerivative(expected.Labels, curr.Labels) &&
-		equality.Semantic.DeepDerivative(expected.Annotations, curr.Annotations) &&
 		equality.Semantic.DeepDerivative(expected.OwnerReferences, curr.OwnerReferences) {
 		log.V(2).Info("Role is up-to-date", "namespace", key.Namespace, "name", key.Name)
 		return nil
@@ -382,23 +383,22 @@ func (k *kedaPrometheusAuthResources) reconcileRole(ctx context.Context, log log
 	return nil
 }
 
-func (k *kedaPrometheusAuthResources) createRole(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) error {
+func (k *kedaPrometheusAuthResources) createRole(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference) error {
 	log.Info("Creating Role", "name", KEDAPrometheusAuthMetricsReaderRoleName)
-	role := k.expectedRole(namespace, ownerRef, annotations)
+	role := k.expectedRole(namespace, ownerRef)
 	if err := k.client.Create(ctx, role); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create Role %s/%s: %w", role.Namespace, role.Name, err)
 	}
 	return nil
 }
 
-func (k *kedaPrometheusAuthResources) expectedRole(namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) *rbacv1.Role {
+func (k *kedaPrometheusAuthResources) expectedRole(namespace string, ownerRef metav1.OwnerReference) *rbacv1.Role {
 	return &rbacv1.Role{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            KEDAPrometheusAuthMetricsReaderRoleName,
 			Namespace:       namespace,
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 			Labels:          getKedaLabels(),
-			Annotations:     annotations,
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
@@ -416,15 +416,15 @@ func (k *kedaPrometheusAuthResources) expectedRole(namespace string, ownerRef me
 }
 
 // --- RoleBinding ---
-func (k *kedaPrometheusAuthResources) reconcileRoleBinding(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) error {
-	expected := k.expectedRoleBinding(namespace, ownerRef, annotations)
+func (k *kedaPrometheusAuthResources) reconcileRoleBinding(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference) error {
+	expected := k.expectedRoleBinding(namespace, ownerRef)
 	curr := &rbacv1.RoleBinding{}
 	key := client.ObjectKey{Namespace: expected.Namespace, Name: expected.Name}
 
 	err := k.client.Get(ctx, key, curr)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return k.createRoleBinding(ctx, log, namespace, ownerRef, annotations)
+			return k.createRoleBinding(ctx, log, namespace, ownerRef)
 		}
 		return fmt.Errorf("failed to get RoleBinding %s: %w", key.String(), err)
 	}
@@ -435,7 +435,6 @@ func (k *kedaPrometheusAuthResources) reconcileRoleBinding(ctx context.Context, 
 	if equality.Semantic.DeepDerivative(expected.Subjects, curr.Subjects) &&
 		equality.Semantic.DeepDerivative(expected.RoleRef, curr.RoleRef) &&
 		equality.Semantic.DeepDerivative(expected.Labels, curr.Labels) &&
-		equality.Semantic.DeepDerivative(expected.Annotations, curr.Annotations) &&
 		equality.Semantic.DeepDerivative(expected.OwnerReferences, curr.OwnerReferences) {
 		log.V(2).Info("RoleBinding is up-to-date", "namespace", key.Namespace, "name", key.Name)
 		return nil
@@ -448,23 +447,22 @@ func (k *kedaPrometheusAuthResources) reconcileRoleBinding(ctx context.Context, 
 	return nil
 }
 
-func (k *kedaPrometheusAuthResources) createRoleBinding(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) error {
+func (k *kedaPrometheusAuthResources) createRoleBinding(ctx context.Context, log logr.Logger, namespace string, ownerRef metav1.OwnerReference) error {
 	log.Info("Creating RoleBinding", "name", KEDAPrometheusAuthMetricsReaderRoleBindingName)
-	rb := k.expectedRoleBinding(namespace, ownerRef, annotations)
+	rb := k.expectedRoleBinding(namespace, ownerRef)
 	if err := k.client.Create(ctx, rb); err != nil && !errors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create RoleBinding %s/%s: %w", rb.Namespace, rb.Name, err)
 	}
 	return nil
 }
 
-func (k *kedaPrometheusAuthResources) expectedRoleBinding(namespace string, ownerRef metav1.OwnerReference, annotations map[string]string) *rbacv1.RoleBinding {
+func (k *kedaPrometheusAuthResources) expectedRoleBinding(namespace string, ownerRef metav1.OwnerReference) *rbacv1.RoleBinding {
 	return &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            KEDAPrometheusAuthMetricsReaderRoleBindingName,
 			Namespace:       namespace,
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 			Labels:          getKedaLabels(),
-			Annotations:     annotations,
 		},
 		Subjects: []rbacv1.Subject{
 			{

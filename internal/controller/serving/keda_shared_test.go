@@ -121,6 +121,32 @@ var _ = Describe("KEDA Prometheus auth resources shared across InferenceService 
 			}
 		})
 
+		It("does not copy owner annotations onto the shared auth resources", func() {
+			// Owners with different annotations used to overwrite each other's copy on every reconcile, and each
+			// write re-enqueued every owner through the Owns() watch.
+			const displayName = "openshift.io/display-name"
+			isvc.Annotations[displayName] = "isvc"
+			if llmisvc.Annotations == nil {
+				llmisvc.Annotations = map[string]string{}
+			}
+			llmisvc.Annotations[displayName] = "llmisvc"
+
+			Expect(kedaReconciler.Reconcile(ctx, GinkgoLogr, isvc)).To(Succeed())
+			Expect(llmReconciler.Reconcile(ctx, GinkgoLogr, llmisvc)).To(Succeed())
+			resourceVersions := map[string]string{}
+			for kind, obj := range getAllKedaTestResources(ctx, k8sClient, testNs) {
+				resourceVersions[kind] = obj.GetResourceVersion()
+			}
+
+			Expect(kedaReconciler.Reconcile(ctx, GinkgoLogr, isvc)).To(Succeed())
+			Expect(llmReconciler.Reconcile(ctx, GinkgoLogr, llmisvc)).To(Succeed())
+
+			for kind, obj := range getAllKedaTestResources(ctx, k8sClient, testNs) {
+				Expect(obj.GetAnnotations()).ToNot(HaveKey(displayName), kind)
+				Expect(obj.GetResourceVersion()).To(Equal(resourceVersions[kind]), kind)
+			}
+		})
+
 		It("keeps the resources when only the InferenceService is deleted", func() {
 			// Delete isvc from the server first (as the live InferenceService controller also observes and agrees
 			// it's going away) before invoking the sub-reconciler's Delete() hook directly, so both converge on the

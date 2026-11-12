@@ -60,7 +60,7 @@ func (k *KserveKEDAReconciler) Reconcile(ctx context.Context, log logr.Logger, i
 	}
 
 	log.Info("Reconciling resources")
-	if err := k.auth.reconcile(ctx, log, isvc.Namespace, AsIsvcOwnerRef(isvc), isvc.Annotations); err != nil {
+	if err := k.auth.reconcile(ctx, log, isvc.Namespace, AsIsvcOwnerRef(isvc)); err != nil {
 		return err
 	}
 	log.Info("Successfully reconciled KEDA resources")

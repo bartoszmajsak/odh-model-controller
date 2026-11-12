@@ -62,7 +62,7 @@ func (k *LLMKEDAReconciler) Reconcile(ctx context.Context, log logr.Logger, llmi
 	}
 
 	log.Info("Reconciling resources")
-	if err := k.auth.reconcile(ctx, log, llmisvc.Namespace, AsLLMIsvcOwnerRef(llmisvc), llmisvc.Annotations); err != nil {
+	if err := k.auth.reconcile(ctx, log, llmisvc.Namespace, AsLLMIsvcOwnerRef(llmisvc)); err != nil {
 		return err
 	}
 	log.Info("Successfully reconciled KEDA resources")
